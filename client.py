@@ -1,67 +1,146 @@
-from socket import *              # Importa todas as funções da biblioteca de sockets
-import time                       # Importa biblioteca para controle de tempo (delay)
+from socket import *
 
-SERVER_NAME = "localhost"         # Endereço do servidor (mesma máquina)
-SERVER_PORT = 12000               # Porta utilizada pelo servidor
-TIMEOUT = 2                       # Tempo máximo de espera por ACK (em segundos)
+# Configurações de conexão
+serverName = 'localhost'
+serverPort = 12000
+clientSocket = socket(AF_INET, SOCK_DGRAM)
 
-def checksum(data):               # Função que calcula o checksum dos dados
-    return sum(bytearray(data.encode())) % 256  # Soma os bytes da mensagem e aplica módulo 256
+print("========================= CLIENTE RDT ============================")
+print("1. Canal perfeito: sem perda, sem corrupcao, sem ACK/NAK.")
+print("2. Canal com erro de bits. ACK/NAK, mas SEM numero de sequencia.")
+print("3. Canal com corrupcao de ACK/NAK + numero de sequencia.")
+print("4. Canal com erro de bits. So ACK (com numero de sequencia).")
+print("5. Canal com erro de bits E perda de pacotes. ACK + temporizador.")
+print("==================================================================")
 
-clientSocket = socket(AF_INET, SOCK_DGRAM)  # Cria socket UDP (IPv4)
-clientSocket.settimeout(TIMEOUT)            # Define tempo limite para espera de resposta
+opcao = int(input("Escolha a versão (1-5): "))
+mensagem = input("Digite uma mensagem: ")
 
-seq = 0                           # Número de sequência inicial (0 ou 1)
+def calcular_checksum(mensagem_checksum):
+    """Calcula a soma simples dos valores ASCII dos caracteres."""
+    soma = 0
+    for caractere in mensagem_checksum:
+        soma += ord(caractere)
+    return str(soma)
 
-print("=== Cliente RDT 3.0 ===")  # Mensagem de inicialização do cliente
+# RDT 1.0 - CANAL PERFEITO
+if opcao == 1:
+    pacote = f"{opcao}|{None}|{None}|{mensagem}"
+    print(f"\n[CLIENTE] [ENVIANDO] Enviando pacote RDT 1.0...")
+    clientSocket.sendto(pacote.encode(), (serverName, serverPort))
+    
+    resposta, serverAddress = clientSocket.recvfrom(2048)
+    print(f"[CLIENTE] [SUCESSO] Servidor respondeu: {resposta.decode()}")
 
-print("\nMENU DO CANAL:")
-print("1 - Entrega normal")       # Opção de envio sem erros
-print("2 - Corromper dados")      # Opção de envio com corrupção simulada
-print("3 - Inserir atraso artificial")  # Opção de atraso na transmissão
+# RDT 2.0 - ERRO DE BITS (ACK/NAK SEM SEQUÊNCIA)
+elif opcao == 2:
+    checksum = calcular_checksum(mensagem)
+    pacote = f"{opcao}|{None}|{checksum}|{mensagem}"
+    print(f"\n[CLIENTE] [ENVIANDO] Enviando pacote RDT 2.0...")
+    clientSocket.sendto(pacote.encode(), (serverName, serverPort))
+    
+    while True:
+        resposta, serverAddress = clientSocket.recvfrom(2048)
+        resposta = resposta.decode()
+        print(f"[CLIENTE] [RECEBIDO] Resposta bruta: {resposta}")
 
-choice = input("Escolha a opção: ")  # Lê a escolha do usuário
+        if resposta.startswith("ACK"):
+            if "|" in resposta:
+                _, msg_modificada = resposta.split("|", 1)
+                print(f"[CLIENTE] [SUCESSO] Mensagem em maiúsculo: {msg_modificada}")
+            break
+        elif resposta == "NAK":
+            print("[CLIENTE] [ERRO] NAK recebido (dados corrompidos). Retransmitindo...")
+            clientSocket.sendto(pacote.encode(), (serverName, serverPort))
 
-message = input("\nDigite a mensagem a ser enviada: ")  # Lê a mensagem a ser enviada
+# RDT 2.1 - CORRUPÇÃO DE ACK/NAK + NÚMERO DE SEQUÊNCIA
+elif opcao == 3:
+    sequencia = 0
+    checksum = calcular_checksum(mensagem)
+    pacote = f"{opcao}|{sequencia}|{checksum}|{mensagem}"
+    print(f"\n[CLIENTE] [ENVIANDO] Enviando pacote RDT 2.1 (seq={sequencia})...")
+    clientSocket.sendto(pacote.encode(), (serverName, serverPort))
 
-send_data = message               # Inicialmente, dados enviados são iguais à mensagem
+    while True:
+        resposta, serverAddress = clientSocket.recvfrom(2048)
+        resposta = resposta.decode()
+        print(f"[CLIENTE] [RECEBIDO] Resposta bruta: {resposta}")
 
-if choice == "2":                 # Verifica se o usuário escolheu corromper os dados
-    send_data = message + "XXX"   # Altera a mensagem para causar erro de checksum
-    print("[Canal] Dados CORROMPIDOS intencionalmente")
-
-if choice == "3":                 # Verifica se o usuário escolheu atraso artificial
-    print("[Canal] Atraso artificial inserido")
-    time.sleep(3)                 # Pausa a execução por 3 segundos
-
-pkt_checksum = checksum(send_data)  # Calcula o checksum dos dados enviados
-packet = f"{seq}|{pkt_checksum}|{send_data}"  # Monta o pacote no formato RDT
-
-while True:                       # Loop para retransmissão em caso de erro
-    print("\n[Cliente] Enviando pacote:")
-    print(f"Seq={seq}, Checksum={pkt_checksum}, Dados='{send_data}'")
-
-    clientSocket.sendto(packet.encode(), (SERVER_NAME, SERVER_PORT))  
-    # Envia o pacote ao servidor via UDP
-
-    print("[Cliente] Aguardando ACK...")
-
-    try:
-        ack, _ = clientSocket.recvfrom(2048)  # Aguarda ACK do servidor
-        ack = ack.decode()                    # Decodifica a mensagem recebida
-        print("[Cliente] ACK recebido:", ack)
-
-        _, ack_seq = ack.split("|")           # Extrai o número de sequência do ACK
-        ack_seq = int(ack_seq)                # Converte para inteiro
-
-        if ack_seq == seq:                    # Verifica se o ACK corresponde ao pacote enviado
-            print("[Cliente] ACK correto → envio concluído")
-            seq = 1 - seq                     # Alterna o número de sequência
-            break                             # Encerra o loop
+        if resposta.startswith(f"ACK{sequencia}"):
+            if "|" in resposta:
+                _, msg_modificada = resposta.split("|", 1)
+                print(f"[CLIENTE] [SUCESSO] Mensagem recebida: {msg_modificada}")
+            else:
+                print("[CLIENTE] [AVISO] Recebido apenas ACK (pacote duplicado detectado pelo servidor).")
+            break
+        elif resposta.startswith(f"NAK{sequencia}"):
+            print(f"[CLIENTE] [ERRO] NAK{sequencia} recebido. Retransmitindo...")
+            clientSocket.sendto(pacote.encode(), (serverName, serverPort))
         else:
-            print("[Cliente] ACK duplicado → retransmitindo")
+            print("[CLIENTE] [CORRUPÇÃO] ACK/NAK veio corrompido! Retransmitindo...")
+            clientSocket.sendto(pacote.encode(), (serverName, serverPort))
 
-    except timeout:                           # Tratamento de estouro de tempo
-        print("[Cliente] TIMEOUT! Retransmitindo pacote...")
+# RDT 2.2 - PROTOCOLO SEM NAK (APENAS ACKS NUMERADOS)
+elif opcao == 4:
+    sequencia = 0
+    checksum = calcular_checksum(mensagem)
+    pacote = f"{opcao}|{sequencia}|{checksum}|{mensagem}"
+    print(f"\n[CLIENTE] [ENVIANDO] Enviando pacote RDT 2.2 (seq={sequencia})...")
+    clientSocket.sendto(pacote.encode(), (serverName, serverPort))
 
-clientSocket.close()                          # Fecha o socket do cliente
+    while True:
+        resposta, serverAddress = clientSocket.recvfrom(2048)
+        resposta = resposta.decode()
+        print(f"[CLIENTE] [RECEBIDO] Resposta bruta: {resposta}")
+
+        if resposta.startswith(f"ACK{sequencia}"):
+            if "|" in resposta:
+                _, msg_modificada = resposta.split("|", 1)
+                print(f"[CLIENTE] [SUCESSO] Mensagem recebida: {msg_modificada}")
+            else:
+                print("[CLIENTE] [AVISO] ACK correto recebido (Estado sincronizado).")
+            break  
+        else:
+            print(f"[CLIENTE] [ERRO] ACK incorreto ou corrompido! Esperava ACK{sequencia}. Retransmitindo...")
+            clientSocket.sendto(pacote.encode(), (serverName, serverPort))
+
+# RDT 3.0 - ERRO DE BITS + PERDA DE PACOTES (TEMPORIZADOR)
+elif opcao == 5:    
+    sequencia = 0
+    checksum = calcular_checksum(mensagem)
+    pacote = f"{opcao}|{sequencia}|{checksum}|{mensagem}"
+    
+    # Configura o temporizador (timeout) para 2 segundos
+    clientSocket.settimeout(2.0)
+    print(f"\n[CLIENTE] [ENVIANDO] Enviando pacote RDT 3.0 (seq={sequencia}). Temporizador iniciado...")
+    clientSocket.sendto(pacote.encode(), (serverName, serverPort))
+
+    while True:
+        try:
+            resposta, serverAddress = clientSocket.recvfrom(2048)
+            resposta = resposta.decode()
+            print(f"[CLIENTE] [RECEBIDO] Resposta bruta: {resposta}")
+
+            if resposta.startswith(f"ACK{sequencia}"):
+                if "|" in resposta:
+                    _, msg_modificada = resposta.split("|", 1)
+                    print(f"[CLIENTE] [SUCESSO] Mensagem recebida: {msg_modificada}")
+                else:
+                    print("[CLIENTE] [AVISO] ACK de confirmação simples recebido.")
+                
+                # Desativa o temporizador para não afetar execuções futuras
+                clientSocket.settimeout(None)
+                break
+            else:
+                print(f"[CLIENTE] [ERRO] ACK incorreto/corrompido. Esperava ACK{sequencia}. Retransmitindo...")
+                clientSocket.sendto(pacote.encode(), (serverName, serverPort))
+                
+        except timeout:
+            print("\n[CLIENTE] [TIMEOUT] O tempo limite expirou! Nenhuma resposta chegou.")
+            print("[CLIENTE] [RETRANSMISSÃO] Enviando o pacote novamente e reiniciando o timer...")
+            clientSocket.sendto(pacote.encode(), (serverName, serverPort))
+
+else:
+    print("[CLIENTE] Opção inválida. Encerrando.")
+    
+clientSocket.close()

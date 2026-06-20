@@ -1,68 +1,152 @@
-from socket import *                 # Importa funções da biblioteca de sockets
-import random                        # Importa biblioteca para gerar números aleatórios
-import time                          # Importa biblioteca para controle de tempo (simulações)
+from socket import *
+from random import randint
+import time
 
-SERVER_PORT = 12000                  # Porta em que o servidor ficará escutando
-LOSS_PROBABILITY = 0.3               # Probabilidade de perda de pacote (30%)
+# Configurações de conexão
+serverPort = 12000
+serverSocket = socket(AF_INET, SOCK_DGRAM)
+serverSocket.bind(('', serverPort))
 
-def checksum(data):                  # Função que calcula o checksum dos dados
-    return sum(bytearray(data.encode())) % 256  
-    # Soma os bytes da mensagem e aplica módulo 256 para verificação de integridade
+# Estado interno global do servidor para controle de fluxo alternado (RDT 2.1 a 3.0)
+sequencia_esperada = 0
 
-def is_corrupt(packet):              # Função que verifica se o pacote está corrompido
-    try:
-        seq, recv_checksum, data = packet.split("|", 2)  
-        # Separa número de sequência, checksum recebido e dados
-        return int(recv_checksum) != checksum(data)  
-        # Compara checksum recebido com o checksum recalculado
-    except:
-        return True                  # Se ocorrer erro, considera o pacote corrompido
+print("========================= SERVIDOR RDT ==========================")
+print(f"Servidor rodando na porta {serverPort} e aguardando mensagens...")
+print("=================================================================")
 
-serverSocket = socket(AF_INET, SOCK_DGRAM)  
-# Cria um socket UDP utilizando IPv4
+def calcular_checksum(mensagem_checksum):
+    """Calcula a soma simples dos valores ASCII dos caracteres."""
+    soma = 0
+    for caractere in mensagem_checksum:
+        soma += ord(caractere)
+    return str(soma)
 
-serverSocket.bind(("", SERVER_PORT)) 
-# Associa o socket a todas as interfaces de rede na porta definida
+while True:
+    # Recebe e desempacota os dados vindos do cliente
+    message, clientAddress = serverSocket.recvfrom(2048)
+    dados = message.decode()
+    versao, sequencia, checksum, mensagem = dados.split("|", 3)
+    
+    print(f"\n[SERVIDOR] [RECEBIDO] Opção: {versao} | Seq: {sequencia} | Msg: {mensagem}")
 
-print("=== Servidor RDT 3.0 ativo ===")  
-# Indica que o servidor está em execução
+    # RDT 1.0 - CANAL PERFEITO
+    if versao == "1":
+        modifiedMessage = mensagem.upper()
+        serverSocket.sendto(modifiedMessage.encode(), clientAddress)
+        print("[SERVIDOR] [SUCESSO] Resposta enviada sem falhas.")
 
-expected_seq = 0                     # Número de sequência esperado inicialmente
+    # RDT 2.0 - ERRO DE BITS (ACK/NAK SEM SEQUÊNCIA)
+    elif versao == "2":
+        checksum_cliente = checksum
+        checksum_servidor = calcular_checksum(mensagem)
+        
+        # Simula erro de bits nos dados (50% de chance)
+        if randint(0, 1) == 1:
+            mensagem += "x"  # Corrompe a string de dados propositalmente
+            checksum_servidor = calcular_checksum(mensagem)
+            
+        if checksum_cliente == checksum_servidor:
+            print("[SERVIDOR] [SUCESSO] Dados íntegros. Enviando ACK.")
+            pacote_resposta = f"ACK|{mensagem.upper()}"
+            serverSocket.sendto(pacote_resposta.encode(), clientAddress)
+        else:
+            print("[SERVIDOR] [ERRO] Dados corrompidos detectados! Enviando NAK.")
+            serverSocket.sendto("NAK".encode(), clientAddress)
 
-while True:                          # Loop principal do servidor
-    packet, clientAddress = serverSocket.recvfrom(2048)  
-    # Recebe pacote do cliente e o endereço de origem
+    # RDT 2.1 - CORRUPÇÃO DE ACK/NAK + NÚMERO DE SEQUÊNCIA
+    elif versao == "3":
+        checksum_cliente = checksum
+        checksum_servidor = calcular_checksum(mensagem)
+        
+        if checksum_cliente == checksum_servidor:
+            if int(sequencia) == sequencia_esperada:
+                modifiedMessage = mensagem.upper()
+                
+                # Simula corrupção do ACK de retorno (50% de chance)
+                if randint(0, 1) == 1:
+                    print(f"[SERVIDOR] [CORRUPÇÃO] Dados corretos, mas simulando envio de ACK{sequencia} corrompido.")
+                    serverSocket.sendto(f"ACX{sequencia}".encode(), clientAddress)
+                else:
+                    print(f"[SERVIDOR] [SUCESSO] Dados corretos (seq={sequencia}). Enviando ACK{sequencia}.")
+                    pacote_resposta = f"ACK{sequencia}|{modifiedMessage}"
+                    serverSocket.sendto(pacote_resposta.encode(), clientAddress)
+                    sequencia_esperada = 1 - sequencia_esperada  # Alterna o estado esperado
+            else:
+                print(f"[SERVIDOR] [AVISO] Pacote duplicado detectado (seq={sequencia}). Reenviando apenas ACK.")
+                serverSocket.sendto(f"ACK{sequencia}".encode(), clientAddress)
+        else:
+            print(f"[SERVIDOR] [ERRO] Dados corrompidos. Enviando NAK{sequencia}.")
+            serverSocket.sendto(f"NAK{sequencia}".encode(), clientAddress)
 
-    packet = packet.decode()         # Decodifica o pacote recebido
+    # RDT 2.2 - PROTOCOLO SEM NAK (APENAS ACKS NUMERADOS)
+    elif versao == "4":
+        checksum_cliente = checksum
+        checksum_servidor = calcular_checksum(mensagem)
+        
+        # Simula erro de bits nos dados (50% de chance)
+        if randint(0, 1) == 1:
+            mensagem += "x"
+            checksum_servidor = calcular_checksum(mensagem)
 
+        if checksum_cliente == checksum_servidor and int(sequencia) == sequencia_esperada:
+            modifiedMessage = mensagem.upper()
+            
+            # Simula corrupção do ACK de retorno (50% de chance)
+            if randint(0, 1) == 1:
+                print(f"[SERVIDOR] [CORRUPÇÃO] Dados corretos, mas simulando envio de ACK{sequencia} corrompido.")
+                serverSocket.sendto(f"ACX{sequencia}".encode(), clientAddress)
+            else:
+                print(f"[SERVIDOR] [SUCESSO] Dados corretos (seq={sequencia}). Enviando ACK{sequencia}.")
+                pacote_resposta = f"ACK{sequencia}|{modifiedMessage}"
+                serverSocket.sendto(pacote_resposta.encode(), clientAddress)
+                sequencia_esperada = 1 - sequencia_esperada
+        else:
+            # Lógica Kurose RDT 2.2: Envia o ACK do ÚLTIMO pacote que deu certo
+            ultimo_correto = 1 - sequencia_esperada
+            print(f"[SERVIDOR] [ERRO/DUPLICADO] Esperava seq={sequencia_esperada}, veio seq={sequencia} (ou corrompido).")
+            print(f"[SERVIDOR] -> Reenviando ACK anterior: ACK{ultimo_correto}")
+            serverSocket.sendto(f"ACK{ultimo_correto}".encode(), clientAddress)
 
-    print("\n[Servidor] Pacote recebido:", packet)
+    # RDT 3.0 - ERRO DE BITS E PERDA DE PACOTES (TEMPORIZADOR)
+    elif versao == "5":
+        checksum_cliente = checksum
+        checksum_servidor = calcular_checksum(mensagem)
+        
+        # 1. Tratamento de Corrupção de Bits nos Dados
+        if checksum_cliente != checksum_servidor:
+            print("[SERVIDOR] [ERRO] Pacote corrompido recebido. Descartando em silêncio (força timeout no cliente).")
+            continue  
+            
+        # 2. Tratamento de Dados Duplicados (Cenários 3 e 4 do Kurose)
+        if int(sequencia) != sequencia_esperada:
+            print(f"[SERVIDOR] [AVISO] Pacote duplicado detectado (esperado={sequencia_esperada}, recebido={sequencia}).")
+            print(f"[SERVIDOR] -> Reenviando apenas confirmação: ACK{sequencia}")
+            serverSocket.sendto(f"ACK{sequencia}".encode(), clientAddress)
+            continue  
 
-    if random.random() < LOSS_PROBABILITY:  
-        # Simula a perda de pacotes no canal
-        print("[Servidor] Pacote PERDIDO (simulação)")
-        continue                     # Ignora o pacote
-
-    if is_corrupt(packet):           # Verifica se o pacote está corrompido
-        print("[Servidor] Pacote CORROMPIDO detectado → ignorado")
-        continue                     # Descarta o pacote corrompido
-
-    seq, recv_checksum, data = packet.split("|", 2)  
-    # Extrai o número de sequência, checksum e dados
-
-    seq = int(seq)                   # Converte o número de sequência para inteiro
-
-    if seq == expected_seq:          # Verifica se o pacote é o esperado
-        print(f"[Servidor] Pacote OK | Seq={seq} | Dados='{data}'")
-        ack = f"ACK|{seq}"            # Cria o ACK com o número de sequência correto
-        serverSocket.sendto(ack.encode(), clientAddress)  
-        # Envia o ACK ao cliente
-        print(f"[Servidor] ACK enviado: {ack}")
-        expected_seq = 1 - expected_seq  
-        # Alterna o número de sequência esperado
-    else:
-        print("[Servidor] Pacote duplicado → reenviando último ACK")
-        ack = f"ACK|{1 - expected_seq}"  
-        # Cria ACK duplicado para pacote já recebido
-        serverSocket.sendto(ack.encode(), clientAddress)  
-        # Reenvia o último ACK ao cliente
+        # 3. Simulação aleatória dos 4 cenários clássicos do livro do Kurose
+        cenario = randint(1, 4)
+        
+        if cenario == 1:
+            print("[SERVIDOR] [CENÁRIO 1] Transmissão Perfeita!")
+            modifiedMessage = mensagem.upper()
+            pacote_resposta = f"ACK{sequencia}|{modifiedMessage}"
+            serverSocket.sendto(pacote_resposta.encode(), clientAddress)
+            sequencia_esperada = 1 - sequencia_esperada
+            
+        elif cenario == 2:
+            print("[SERVIDOR] [CENÁRIO 2] Pacote foi Perdido na rede! Ignorando propositalmente...")
+            # Não faz nada. O cliente dará timeout e retransmitirá.
+            
+        elif cenario == 3:
+            print("[SERVIDOR] [CENÁRIO 3] ACK foi Perdido na rede! Aceitando dado internamente, mas retendo ACK...")
+            sequencia_esperada = 1 - sequencia_esperada
+            # Não responde. O cliente dará timeout, enviará duplicata e o servidor responderá no bloco acima.
+            
+        elif cenario == 4:
+            print("[SERVIDOR] [CENÁRIO 4] Timeout Prematuro! Forçando atraso na rede (lag de 4 segundos)...")
+            time.sleep(4.0)  
+            modifiedMessage = mensagem.upper()
+            pacote_resposta = f"ACK{sequencia}|{modifiedMessage}"
+            serverSocket.sendto(pacote_resposta.encode(), clientAddress)
+            sequencia_esperada = 1 - sequencia_esperada
